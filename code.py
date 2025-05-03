@@ -1,10 +1,9 @@
-# code.py - Full featured test
+# code.py v21 - Full featured test for AS7343
 import board
 import time
 import as7343
 
 i2c = board.STEMMA_I2C()
-
 try:
     sensor = as7343.AS7343(i2c)
     print("AS7343 sensor found!")
