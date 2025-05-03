@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2025 Joe Pardue
+# SPDX-FileCopyrightText: 2025 Your Name for Adafruit Industries
 # SPDX-License-Identifier: MIT
 
 """
@@ -14,13 +14,22 @@ Implementation Notes
 
 **Hardware:**
 
-* AS7343 14-Channel Near-IR, Visible Light, UV Spectral Sensor
+* AS7343 14-Channel Multi-Purpose Spectral Sensor
+* https://ams.com/as7343
 
 **Software and Dependencies:**
 
 * Adafruit CircuitPython firmware for the supported boards:
   https://circuitpython.org/downloads
-* Adafruit's Bus Device library: https://github.com/adafruit/Adafruit_CircuitPython_BusDevice
+* Adafruit's Bus Device library: 
+  https://github.com/adafruit/Adafruit_CircuitPython_BusDevice
+
+**Notes:**
+
+* This driver supports the AS7343's auto-SMUX feature for simplified channel reading
+* Automatic gain control helps prevent saturation and optimize sensitivity
+* Integration time can be configured from microseconds to seconds
+* All 12 spectral channels plus 4 clear channels are accessible
 """
 
 import time
@@ -117,8 +126,10 @@ class AS7343:
     """
     Driver for the AS7343 14-channel spectral sensor.
     
-    This sensor provides 14 spectral channels covering UV, visible and near-IR
-    wavelengths from 340nm to 1030nm.
+    The AS7343 is a 14-channel spectral sensor covering UV, visible and near-IR
+    wavelengths from 340nm to 1030nm. It features automatic gain control,
+    configurable integration time, and an innovative auto-SMUX feature that
+    simplifies reading multiple channels.
     
     :param i2c_bus: The I2C bus the AS7343 is connected to
     :param address: The I2C device address. Defaults to 0x39
@@ -133,6 +144,10 @@ class AS7343:
             i2c = board.I2C()  # uses board.SCL and board.SDA
             sensor = as7343.AS7343(i2c)
             
+            # Set gain and integration time
+            sensor.set_gain(as7343.Gain.X16)
+            sensor.set_integration_time_ms(100)
+            
             # Read all spectral channels
             channels = sensor.read_all_channels_auto()
             print(f"Channel values: {channels}")
@@ -140,9 +155,36 @@ class AS7343:
             # Get calibrated readings
             calibrated = sensor.read_all_channels_calibrated()
             print(f"Calibrated values: {calibrated}")
+            
+            # Auto-adjust gain if needed
+            gain_changed, new_gain = sensor.auto_adjust_gain(channels)
+            if gain_changed:
+                print(f"Gain adjusted to {new_gain}x")
+            
+            # Access individual channels
+            blue_450nm = sensor.channel_450nm_fz
+            green_555nm = sensor.channel_555nm_fy
+            
+            # Get all channels as a dictionary
+            all_channels = sensor.all_channels
+            print(f"F2 (425nm): {all_channels['F2_425nm']}")
     """
     
     def __init__(self, i2c_bus, address: int = 0x39) -> None:
+        """
+        Initialize the AS7343 sensor.
+        
+        Performs the following startup sequence:
+        1. Verifies the device ID by switching to register bank 1
+        2. Powers on the device and resets to default state
+        3. Sets default integration time (~50ms)
+        4. Sets default gain (256x)
+        5. Initializes SMUX with ROM command 0
+        
+        :param i2c_bus: The I2C bus interface to use for communication
+        :param address: The I2C address of the device (default 0x39)
+        :raises RuntimeError: If the device ID doesn't match expected value
+        """
         self.i2c_device = i2c_device.I2CDevice(i2c_bus, address)
         self._buffer = bytearray(2)
         
@@ -265,30 +307,74 @@ class AS7343:
             channels.append(value)
         return channels
     
-    def enable_auto_smux(self, mode: int = 2) -> None:
+    def enable_auto_smux(self, mode: Union[AutoSMUXMode, int] = AutoSMUXMode.TWELVE_CHANNEL) -> None:
         """
         Enable auto-SMUX mode for automatic channel switching.
         
-        :param mode: Auto-SMUX mode:
-                     - 0: 6 channel (single cycle)
-                     - 2: 12 channel (2 cycles)
-                     - 3: 18 channel (3 cycles with Flicker)
-        """
-        if mode not in (0, 2, 3):
-            raise ValueError("Auto-SMUX mode must be 0, 2, or 3")
+        :param mode: Auto-SMUX mode as AutoSMUXMode enum or int:
+                     - AutoSMUXMode.SIX_CHANNEL (0): 6 channel (single cycle)
+                     - AutoSMUXMode.TWELVE_CHANNEL (2): 12 channel (2 cycles)  
+                     - AutoSMUXMode.EIGHTEEN_CHANNEL (3): 18 channel (3 cycles with Flicker)
+        :raises ValueError: If mode is not valid
         
-        cfg20 = mode << 5  # Set auto_smux bits [6:5]
+        **Example Usage:**
+        
+            .. code-block:: python
+            
+                # Using enum (recommended)
+                sensor.enable_auto_smux(as7343.AutoSMUXMode.TWELVE_CHANNEL)
+                
+                # Using int value
+                sensor.enable_auto_smux(2)
+        """
+        if isinstance(mode, AutoSMUXMode):
+            mode_value = mode.value
+        elif isinstance(mode, int):
+            if mode not in (0, 2, 3):
+                raise ValueError("Auto-SMUX mode must be 0, 2, or 3")
+            mode_value = mode
+        else:
+            raise TypeError("Mode must be AutoSMUXMode enum or int")
+        
+        cfg20 = mode_value << 5  # Set auto_smux bits [6:5]
         self._write_register(_AS7343_CFG20, cfg20)
     
     def read_all_channels_auto(self) -> List[int]:
         """
-        Read all channels using auto-SMUX (12 channels).
+        Read all 12 spectral channels using auto-SMUX feature.
         
         This method uses the AS7343's auto-SMUX feature to automatically
         cycle through two measurement configurations, returning data for
-        all 12 spectral channels.
+        all 12 spectral channels. The channels are returned in this order:
         
-        :return: List of 12 channel values as 16-bit integers
+        Index 0: FZ_450nm
+        Index 1: FY_555nm
+        Index 2: FXL_600nm
+        Index 3: NIR_855nm
+        Index 4: VIS (clear)
+        Index 5: VIS2 (clear)
+        Index 6: F2_425nm
+        Index 7: F3_475nm
+        Index 8: F4_515nm
+        Index 9: F6_640nm
+        Index 10: VIS3 (clear)
+        Index 11: VIS4 (clear)
+        
+        :return: List of 12 channel values as 16-bit integers (0-65535)
+        
+        **Example Usage:**
+        
+            .. code-block:: python
+            
+                channels = sensor.read_all_channels_auto()
+                
+                # Access specific channels by index
+                fz_450nm = channels[0]
+                fy_555nm = channels[1]
+                
+                # Or use all_channels property for labeled access
+                all_ch = sensor.all_channels
+                blue_450nm = all_ch['FZ_450nm']
         """
         # Enable auto-SMUX mode 2 (12 channels)
         self.enable_auto_smux(2)
@@ -407,28 +493,42 @@ class AS7343:
         
         :param channels: List of channel values to evaluate
         :return: Tuple of (gain_changed, new_gain_value)
+        
+        **Example Usage:**
+        
+            .. code-block:: python
+            
+                channels = sensor.read_all_channels_auto()
+                gain_changed, new_gain = sensor.auto_adjust_gain(channels)
+                if gain_changed:
+                    print(f"Gain adjusted to {new_gain}x")
+                    # Re-read with new gain
+                    channels = sensor.read_all_channels_auto()
         """
         current_gain = self.gain
         max_value = max(channels)
         
+        # Get ordered list of gain values
+        gain_values = sorted(_GAIN_ENUM_TO_VALUE.values())
+        
         # If saturated, reduce gain
+        # The saturation threshold is set to ~18,000 (out of 65,535 max)
+        # to provide headroom before actual saturation occurs
         if max_value > 18000:  # Approximate saturation threshold
             if current_gain > 0.5:
                 # Find next lower gain
-                gains = sorted(_AS7343_GAIN_VALUES.keys())
-                current_idx = gains.index(current_gain)
+                current_idx = gain_values.index(current_gain)
                 if current_idx > 0:
-                    new_gain = gains[current_idx - 1]
+                    new_gain = gain_values[current_idx - 1]
                     self.set_gain(new_gain)
                     return True, new_gain
         
         # If too low, increase gain  
         elif max_value < 1000 and current_gain < 2048:
             # Find next higher gain
-            gains = sorted(_AS7343_GAIN_VALUES.keys())
-            current_idx = gains.index(current_gain)
-            if current_idx < len(gains) - 1:
-                new_gain = gains[current_idx + 1]
+            current_idx = gain_values.index(current_gain)
+            if current_idx < len(gain_values) - 1:
+                new_gain = gain_values[current_idx + 1]
                 self.set_gain(new_gain)
                 return True, new_gain
         
