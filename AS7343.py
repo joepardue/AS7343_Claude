@@ -1,7 +1,40 @@
-# as7343.py - AS7343 CircuitPython library
+# SPDX-FileCopyrightText: 2025 Joe Pardue
+# SPDX-License-Identifier: MIT
+
+"""
+`as7343`
+================================================================================
+
+CircuitPython driver for the AS7343 14-channel spectral sensor
+
+* Author(s): Your Name
+
+Implementation Notes
+--------------------
+
+**Hardware:**
+
+* AS7343 14-Channel Near-IR, Visible Light, UV Spectral Sensor
+
+**Software and Dependencies:**
+
+* Adafruit CircuitPython firmware for the supported boards:
+  https://circuitpython.org/downloads
+* Adafruit's Bus Device library: https://github.com/adafruit/Adafruit_CircuitPython_BusDevice
+"""
+
 import time
 from adafruit_bus_device import i2c_device
 from micropython import const
+from typing import List, Dict, Tuple, Optional, Union
+
+try:
+    from typing import Literal
+except ImportError:
+    from typing_extensions import Literal
+
+__version__ = "0.0.0+auto.0"
+__repo__ = "https://github.com/adafruit/Adafruit_CircuitPython_AS7343.git"
 
 # Register addresses
 _AS7343_WHOAMI = const(0x5A)  # Device ID register
@@ -31,26 +64,87 @@ _AS7343_REG_BANK = const(0x10)  # Bit 4
 # STATUS2 bits
 _AS7343_AVALID = const(0x40)  # Bit 6
 
-# Gain values mapping
-_AS7343_GAIN_VALUES = {
-    0.5: 0,
-    1: 1,
-    2: 2,
-    4: 3,
-    8: 4,
-    16: 5,
-    32: 6,
-    64: 7,
-    128: 8,
-    256: 9,
-    512: 10,
-    1024: 11,
-    2048: 12
+try:
+    from enum import IntEnum
+except ImportError:
+    # For CircuitPython compatibility
+    class IntEnum:
+        pass
+
+class Gain(IntEnum):
+    """Valid gain values for the AS7343 sensor."""
+    X0_5 = 0
+    X1 = 1
+    X2 = 2
+    X4 = 3
+    X8 = 4
+    X16 = 5
+    X32 = 6
+    X64 = 7
+    X128 = 8
+    X256 = 9
+    X512 = 10
+    X1024 = 11
+    X2048 = 12
+
+class AutoSMUXMode(IntEnum):
+    """Auto-SMUX mode options."""
+    SIX_CHANNEL = 0
+    TWELVE_CHANNEL = 2
+    EIGHTEEN_CHANNEL = 3
+
+# Map gain enum values to actual multiplier values
+_GAIN_ENUM_TO_VALUE = {
+    Gain.X0_5: 0.5,
+    Gain.X1: 1,
+    Gain.X2: 2,
+    Gain.X4: 4,
+    Gain.X8: 8,
+    Gain.X16: 16,
+    Gain.X32: 32,
+    Gain.X64: 64,
+    Gain.X128: 128,
+    Gain.X256: 256,
+    Gain.X512: 512,
+    Gain.X1024: 1024,
+    Gain.X2048: 2048
 }
 
+# Reverse mapping for setting gain
+_GAIN_VALUE_TO_ENUM = {v: k for k, v in _GAIN_ENUM_TO_VALUE.items()}
+
 class AS7343:
-    def __init__(self, i2c_bus, address=0x39):
+    """
+    Driver for the AS7343 14-channel spectral sensor.
+    
+    This sensor provides 14 spectral channels covering UV, visible and near-IR
+    wavelengths from 340nm to 1030nm.
+    
+    :param i2c_bus: The I2C bus the AS7343 is connected to
+    :param address: The I2C device address. Defaults to 0x39
+    
+    **Quick Start: Basic Usage**
+    
+        .. code-block:: python
+        
+            import board
+            import as7343
+            
+            i2c = board.I2C()  # uses board.SCL and board.SDA
+            sensor = as7343.AS7343(i2c)
+            
+            # Read all spectral channels
+            channels = sensor.read_all_channels_auto()
+            print(f"Channel values: {channels}")
+            
+            # Get calibrated readings
+            calibrated = sensor.read_all_channels_calibrated()
+            print(f"Calibrated values: {calibrated}")
+    """
+    
+    def __init__(self, i2c_bus, address: int = 0x39) -> None:
         self.i2c_device = i2c_device.I2CDevice(i2c_bus, address)
+        self._buffer = bytearray(2)
         
         # Need to set correct register bank to read ID
         self._write_register(_AS7343_CFG0, _AS7343_REG_BANK)  # Set REG_BANK = 1
@@ -58,7 +152,6 @@ class AS7343:
         
         # Check device ID
         device_id = self._read_register(_AS7343_WHOAMI)
-        print(f"Read device ID: {device_id:#x}")
         if device_id != _AS7343_DEVICE_ID:
             raise RuntimeError(f"Failed to find AS7343! Expected ID: {_AS7343_DEVICE_ID:#x}, Found: {device_id:#x}")
         
@@ -80,24 +173,43 @@ class AS7343:
         
         # Initialize SMUX with command 0 (ROM initialization)
         self._smux_command(0)
+    
+    def _read_register(self, address: int, length: int = 1) -> Union[int, bytearray]:
+        """
+        Read a register or sequence of registers.
         
-    def _read_register(self, address, length=1):
+        :param address: Register address to read from
+        :param length: Number of bytes to read, defaults to 1
+        :return: Register value(s) as int for single byte or bytearray for multiple
+        """
         with self.i2c_device as i2c:
             if length == 1:
-                result = bytearray(1)
-                i2c.write_then_readinto(bytes([address]), result)
-                return result[0]
+                self._buffer[0] = address
+                i2c.write_then_readinto(self._buffer, self._buffer, out_end=1, in_end=1)
+                return self._buffer[0]
             else:
                 result = bytearray(length)
                 i2c.write_then_readinto(bytes([address]), result)
                 return result
     
-    def _write_register(self, address, value):
+    def _write_register(self, address: int, value: int) -> None:
+        """
+        Write a value to a register.
+        
+        :param address: Register address to write to
+        :param value: Value to write (max 8 bits)
+        """
         with self.i2c_device as i2c:
-            i2c.write(bytes([address, value & 0xFF]))
+            self._buffer[0] = address
+            self._buffer[1] = value & 0xFF
+            i2c.write(self._buffer)
     
-    def _smux_command(self, command):
-        """Execute SMUX command"""
+    def _smux_command(self, command: int) -> None:
+        """
+        Execute SMUX command.
+        
+        :param command: SMUX command value (0-7)
+        """
         # Write command to CFG6
         self._write_register(_AS7343_CFG6, command << 3)
         
@@ -110,20 +222,31 @@ class AS7343:
         while self._read_register(_AS7343_ENABLE) & _AS7343_SMUXEN:
             time.sleep(0.001)
     
-    def start_measurement(self):
-        """Start a spectral measurement"""
+    def start_measurement(self) -> None:
+        """Start a spectral measurement."""
         enable = self._read_register(_AS7343_ENABLE)
         enable |= _AS7343_SP_EN
         self._write_register(_AS7343_ENABLE, enable)
     
-    def measurement_complete(self):
-        """Check if measurement is complete"""
+    def measurement_complete(self) -> bool:
+        """
+        Check if measurement is complete.
+        
+        :return: True if measurement is complete, False otherwise
+        """
         # Check STATUS2 register for AVALID bit
         status2 = self._read_register(_AS7343_STATUS2)
         return bool(status2 & _AS7343_AVALID)
     
-    def read_all_channels(self):
-        """Read all 6 basic channels"""
+    def read_all_channels(self) -> List[int]:
+        """
+        Read all 6 basic channels.
+        
+        This method performs a single measurement cycle using the current SMUX
+        configuration and returns raw channel data.
+        
+        :return: List of 6 channel values as 16-bit integers
+        """
         self.start_measurement()
         
         count = 0
@@ -142,17 +265,31 @@ class AS7343:
             channels.append(value)
         return channels
     
-    def enable_auto_smux(self, mode=2):
-        """Enable auto-SMUX mode
-        mode: 0 = 6 channel (single cycle)
-              2 = 12 channel (2 cycles) 
-              3 = 18 channel (3 cycles with Flicker)
+    def enable_auto_smux(self, mode: int = 2) -> None:
         """
+        Enable auto-SMUX mode for automatic channel switching.
+        
+        :param mode: Auto-SMUX mode:
+                     - 0: 6 channel (single cycle)
+                     - 2: 12 channel (2 cycles)
+                     - 3: 18 channel (3 cycles with Flicker)
+        """
+        if mode not in (0, 2, 3):
+            raise ValueError("Auto-SMUX mode must be 0, 2, or 3")
+        
         cfg20 = mode << 5  # Set auto_smux bits [6:5]
         self._write_register(_AS7343_CFG20, cfg20)
     
-    def read_all_channels_auto(self):
-        """Read all channels using auto-SMUX (12 channels)"""
+    def read_all_channels_auto(self) -> List[int]:
+        """
+        Read all channels using auto-SMUX (12 channels).
+        
+        This method uses the AS7343's auto-SMUX feature to automatically
+        cycle through two measurement configurations, returning data for
+        all 12 spectral channels.
+        
+        :return: List of 12 channel values as 16-bit integers
+        """
         # Enable auto-SMUX mode 2 (12 channels)
         self.enable_auto_smux(2)
         
@@ -185,13 +322,33 @@ class AS7343:
         
         return channels
     
-    def set_gain(self, gain):
-        """Set the sensor gain (0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048)"""
-        if gain not in _AS7343_GAIN_VALUES:
-            raise ValueError(f"Invalid gain value. Must be one of: {list(_AS7343_GAIN_VALUES.keys())}")
+    def set_gain(self, gain: Union[Gain, float]) -> None:
+        """
+        Set the sensor gain.
         
-        gain_reg = _AS7343_GAIN_VALUES[gain]
-        self._write_register(_AS7343_CFG1, gain_reg & 0x1F)
+        :param gain: Gain value as Gain enum or float (0.5, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048)
+        :raises ValueError: If gain value is not valid
+        
+        **Example Usage:**
+        
+            .. code-block:: python
+            
+                # Using enum (recommended)
+                sensor.set_gain(as7343.Gain.X16)
+                
+                # Using float value
+                sensor.set_gain(16.0)
+        """
+        if isinstance(gain, Gain):
+            gain_enum = gain
+        elif isinstance(gain, (int, float)):
+            if gain not in _GAIN_VALUE_TO_ENUM:
+                raise ValueError(f"Invalid gain value. Must be one of: {list(_GAIN_VALUE_TO_ENUM.keys())}")
+            gain_enum = _GAIN_VALUE_TO_ENUM[gain]
+        else:
+            raise TypeError("Gain must be Gain enum or float value")
+        
+        self._write_register(_AS7343_CFG1, gain_enum & 0x1F)
         
         # Verify the gain was set correctly
         time.sleep(0.01)  # Small delay to ensure register is updated
@@ -200,18 +357,37 @@ class AS7343:
             print(f"Warning: Gain set to {gain}x but read back as {actual_gain}x")
     
     @property
-    def gain(self):
-        """Get the current gain setting"""
+    def gain(self) -> float:
+        """
+        Get the current gain setting.
+        
+        :return: Current gain value as float multiplier
+        
+        **Example Usage:**
+        
+            .. code-block:: python
+            
+                current_gain = sensor.gain
+                print(f"Current gain: {current_gain}x")
+        """
         gain_reg = self._read_register(_AS7343_CFG1) & 0x1F
-        for gain_value, reg_value in _AS7343_GAIN_VALUES.items():
-            if reg_value == gain_reg:
-                return gain_value
+        
+        # Find matching enum value
+        for gain_enum, reg_value in list(Gain.__members__.items()):
+            if reg_value.value == gain_reg:
+                return _GAIN_ENUM_TO_VALUE[Gain(reg_value)]
+        
         # If no match found, return a default value
         print(f"Warning: Unknown gain register value: {gain_reg}")
         return 1.0  # Default to 1x gain
     
-    def check_saturation(self, channels):
-        """Check if any channels are saturated (near max value)"""
+    def check_saturation(self, channels: List[int]) -> Tuple[bool, List[int]]:
+        """
+        Check if any channels are saturated (near max value).
+        
+        :param channels: List of channel values to check
+        :return: Tuple of (is_saturated, list of saturated channel indices)
+        """
         max_value = 0xFFFF  # 16-bit max
         saturation_threshold = max_value * 0.95  # 95% of max
         
@@ -222,8 +398,16 @@ class AS7343:
         
         return len(saturated) > 0, saturated
     
-    def auto_adjust_gain(self, channels):
-        """Automatically adjust gain based on channel readings"""
+    def auto_adjust_gain(self, channels: List[int]) -> Tuple[bool, float]:
+        """
+        Automatically adjust gain based on channel readings.
+        
+        This method checks if any channels are saturated or too low and adjusts
+        the gain accordingly. Returns whether gain was changed and the new gain value.
+        
+        :param channels: List of channel values to evaluate
+        :return: Tuple of (gain_changed, new_gain_value)
+        """
         current_gain = self.gain
         max_value = max(channels)
         
@@ -250,17 +434,31 @@ class AS7343:
         
         return False, current_gain
     
-    def set_integration_time(self, atime, astep):
-        """Set integration time parameters
-        Integration time = (ATIME + 1) × (ASTEP + 1) × 2.78µs
+    def set_integration_time(self, atime: int, astep: int) -> None:
         """
+        Set integration time parameters.
+        
+        Integration time = (ATIME + 1) × (ASTEP + 1) × 2.78µs
+        
+        :param atime: ATIME register value (0-255)
+        :param astep: ASTEP register value (0-65535)
+        """
+        if not 0 <= atime <= 255:
+            raise ValueError("ATIME must be between 0 and 255")
+        if not 0 <= astep <= 65535:
+            raise ValueError("ASTEP must be between 0 and 65535")
+            
         self._write_register(_AS7343_ATIME, atime & 0xFF)
         self._write_register(_AS7343_ASTEP_L, astep & 0xFF)
         self._write_register(_AS7343_ASTEP_H, (astep >> 8) & 0xFF)
     
     @property
-    def integration_time_ms(self):
-        """Get current integration time in milliseconds"""
+    def integration_time_ms(self) -> float:
+        """
+        Get current integration time in milliseconds.
+        
+        :return: Integration time in milliseconds
+        """
         atime = self._read_register(_AS7343_ATIME)
         astep_l = self._read_register(_AS7343_ASTEP_L)
         astep_h = self._read_register(_AS7343_ASTEP_H)
@@ -269,8 +467,18 @@ class AS7343:
         # Integration time = (ATIME + 1) × (ASTEP + 1) × 2.78µs
         return (atime + 1) * (astep + 1) * 2.78 / 1000
     
-    def set_integration_time_ms(self, time_ms):
-        """Set integration time in milliseconds (approximate)"""
+    def set_integration_time_ms(self, time_ms: float) -> None:
+        """
+        Set integration time in milliseconds (approximate).
+        
+        The actual integration time will be the closest achievable value
+        based on available register settings.
+        
+        :param time_ms: Desired integration time in milliseconds
+        """
+        if time_ms <= 0:
+            raise ValueError("Integration time must be positive")
+            
         # Calculate ATIME and ASTEP for desired time
         # time_ms = (ATIME + 1) × (ASTEP + 1) × 2.78µs / 1000
         total_steps = int(time_ms * 1000 / 2.78)
@@ -287,8 +495,15 @@ class AS7343:
         
         self.set_integration_time(atime, astep)
     
-    def read_all_channels_calibrated(self):
-        """Read all channels and return calibrated values considering gain and integration time"""
+    def read_all_channels_calibrated(self) -> List[float]:
+        """
+        Read all channels and return calibrated values.
+        
+        Values are normalized by gain and integration time to provide
+        counts per millisecond per gain unit.
+        
+        :return: List of calibrated channel values
+        """
         channels = self.read_all_channels_auto()
         gain = self.gain
         integration_time = self.integration_time_ms
@@ -315,8 +530,12 @@ class AS7343:
         return calibrated
     
     @property
-    def all_channels(self):
-        """Return all channels in a standardized order"""
+    def all_channels(self) -> Dict[str, int]:
+        """
+        Get all channels in a dictionary with wavelength labels.
+        
+        :return: Dictionary mapping channel names to values
+        """
         raw = self.read_all_channels_auto()
         # Rearrange to match spectral order
         return {
@@ -336,41 +555,41 @@ class AS7343:
     
     # Individual channel properties
     @property
-    def channel_450nm_fz(self):
+    def channel_450nm_fz(self) -> int:
         """FZ channel - 450nm (Blue)"""
         return self.read_all_channels_auto()[0]
 
     @property
-    def channel_555nm_fy(self):
+    def channel_555nm_fy(self) -> int:
         """FY channel - 555nm (Green)"""  
         return self.read_all_channels_auto()[1]
 
     @property
-    def channel_600nm_fxl(self):
+    def channel_600nm_fxl(self) -> int:
         """FXL channel - 600nm (Orange)"""
         return self.read_all_channels_auto()[2]
 
     @property
-    def channel_855nm_nir(self):
+    def channel_855nm_nir(self) -> int:
         """NIR channel - 855nm"""
         return self.read_all_channels_auto()[3]
 
     @property
-    def channel_425nm_f2(self):
+    def channel_425nm_f2(self) -> int:
         """F2 channel - 425nm (Violet)"""
         return self.read_all_channels_auto()[6]
 
     @property
-    def channel_475nm_f3(self):
+    def channel_475nm_f3(self) -> int:
         """F3 channel - 475nm (Blue)"""
         return self.read_all_channels_auto()[7]
 
     @property
-    def channel_515nm_f4(self):
+    def channel_515nm_f4(self) -> int:
         """F4 channel - 515nm (Cyan)"""
         return self.read_all_channels_auto()[8]
 
     @property
-    def channel_640nm_f6(self):
+    def channel_640nm_f6(self) -> int:
         """F6 channel - 640nm (Red)"""
         return self.read_all_channels_auto()[9]
