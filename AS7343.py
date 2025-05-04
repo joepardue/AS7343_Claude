@@ -31,8 +31,16 @@ Implementation Notes
 * Automatic gain control helps prevent saturation and optimize sensitivity
 * Integration time can be configured from microseconds to seconds
 * All 12 spectral channels plus 4 clear channels are accessible
-"""
 
+**Hardware Limitations on Pimoroni Breakout:**
+
+* GPIO functionality (register 0x6B): The AS7343 chip has a GPIO pin that can be configured as input/output, 
+* but this pin is not accessible on the Pimoroni breakout board. The board only exposes VCC, GND, SDA, SCL, and INT pins.
+
+* Interrupt functionality (register 0xF9): The AS7343 supports hardware interrupts for events like measurement completion, 
+* threshold detection, and FIFO status. The INT pin is available on the Pimoroni breakout and can be used 
+* with CircuitPython's pin interrupt features. Future implementation could include threshold interrupts and measurement ready signals.
+"""
 import time
 from adafruit_bus_device import i2c_device
 from micropython import const
